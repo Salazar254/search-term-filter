@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# Node
+node_modules/
+dist/
+.env
+
+# Project Specific
+data/output_*.csv
+data/editor_*.csv
+web/server/uploads/
+web/server/outputs/

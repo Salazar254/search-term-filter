@@ -1,0 +1,5 @@
+negative_keyword,match_type
+running shoes,EXACT
+running shoes,PHRASE
+running shoes,BROAD
+kids,BROAD
