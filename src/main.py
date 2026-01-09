@@ -195,26 +195,29 @@ def normalize_column_names(df, file_type='search_terms'):
         
         for col in df_columns:
             col_lower = col.lower()
-            if any(term in col_lower for term in ['negative', 'keyword', 'match']):
+            # Prioritize 'negative_keyword' or similar keyword column
+            if col_lower == 'negative_keyword' or (any(term in col_lower for term in ['negative']) and 'keyword' in col_lower):
                 keyword_col = col
-            elif 'match' in col_lower and 'type' in col_lower:
+            # Find match type column
+            elif col_lower == 'match_type' or ('match' in col_lower and 'type' in col_lower):
                 match_type_col = col
         
-        if keyword_col:
+        # If no explicit match type found, look for type/campaign columns
+        if not match_type_col:
+            for col in df_columns:
+                col_lower = col.lower()
+                if col_lower in ['type', 'match', 'campaign'] or 'match' in col_lower:
+                    match_type_col = col
+                    break
+        
+        # Rename columns to standard names
+        if keyword_col and keyword_col != 'negative_keyword':
             df = df.rename(columns={keyword_col: 'negative_keyword'})
             print(f"  Found negative keyword column: '{keyword_col}' -> 'negative_keyword'")
         
-        if match_type_col:
+        if match_type_col and match_type_col != 'match_type':
             df = df.rename(columns={match_type_col: 'match_type'})
             print(f"  Found match type column: '{match_type_col}' -> 'match_type'")
-        else:
-            # Try to infer match type column
-            for col in df_columns:
-                if col.lower() in ['type', 'match', 'campaign']:
-                    match_type_col = col
-                    df = df.rename(columns={col: 'match_type'})
-                    print(f"  Inferred match type column: '{col}' -> 'match_type'")
-                    break
     
     return df
 
@@ -265,88 +268,95 @@ def load_negatives(filepath):
     return df
 
 def filter_search_terms(terms_df, negatives_df):
-    """Filter search terms based on negative keywords"""
+    """Filter search terms based on negative keywords using optimized vectorized operations"""
     print("Filtering terms...")
     
-    # Prepare results
-    results = []
-    audit_trail = []
+    # Normalize and prepare data
+    terms_df = terms_df.copy()
+    negatives_df = negatives_df.copy()
     
-    for _, term_row in terms_df.iterrows():
-        # Safely get search term
-        search_term = str(term_row.get('Search term', '')).strip().lower()
-        if pd.isna(search_term) or search_term == 'nan':
-            search_term = ''
-        
-        excluded = False
-        exclusion_reason = ""
-        matched_negative = ""
-        matched_type = ""
-        
-        for _, neg_row in negatives_df.iterrows():
-            negative = str(neg_row.get('negative_keyword', '')).strip().lower()
-            if pd.isna(negative) or negative == 'nan':
-                continue
-            
-            match_type = neg_row.get('match_type', 'BROAD')
-            match_type = str(match_type).strip().upper() if not pd.isna(match_type) else 'BROAD'
-            
-            # Skip if search term or negative is empty
-            if not search_term or not negative:
-                continue
-            
-            # Apply match type logic
-            if match_type == 'EXACT':
-                if search_term == negative:
-                    excluded = True
-                    exclusion_reason = f"Excluded by EXACT negative: {neg_row['negative_keyword']}"
-                    matched_negative = neg_row['negative_keyword']
-                    matched_type = match_type
-                    break
-            
-            elif match_type == 'PHRASE':
-                if negative in search_term:
-                    excluded = True
-                    exclusion_reason = f"Excluded by PHRASE negative: {neg_row['negative_keyword']}"
-                    matched_negative = neg_row['negative_keyword']
-                    matched_type = match_type
-                    break
-            
-            elif match_type == 'BROAD':
-                # Check if any word from negative appears in search term
-                neg_words = negative.split()
-                term_words = search_term.split()
-                if any(word in term_words for word in neg_words):
-                    excluded = True
-                    exclusion_reason = f"Excluded by BROAD negative: {neg_row['negative_keyword']}"
-                    matched_negative = neg_row['negative_keyword']
-                    matched_type = match_type
-                    break
-        
-        if not excluded:
-            exclusion_reason = "Not matched by any negative"
-        
-        # Create result row
-        result_row = term_row.to_dict()
-        result_row['excluded_by_negatives'] = excluded
-        result_row['exclusion_reason'] = exclusion_reason
-        result_row['checked_at'] = datetime.now().isoformat()
-        
-        # Create audit row
-        audit_row = result_row.copy()
-        if excluded:
-            audit_row['matched_negative_keyword'] = matched_negative
-            audit_row['matched_negative_match_type'] = matched_type
-        else:
-            audit_row['matched_negative_keyword'] = ''
-            audit_row['matched_negative_match_type'] = ''
-        
-        results.append(result_row)
-        audit_trail.append(audit_row)
+    # Normalize search terms
+    terms_df['search_term_lower'] = terms_df['Search term'].fillna('').astype(str).str.strip().str.lower()
+    terms_df['search_term_words'] = terms_df['search_term_lower'].str.split()
     
-    # Convert to DataFrames
-    results_df = pd.DataFrame(results)
-    audit_df = pd.DataFrame(audit_trail)
+    # Normalize negatives
+    negatives_df['negative_lower'] = negatives_df['negative_keyword'].fillna('').astype(str).str.strip().str.lower()
+    negatives_df['negative_words'] = negatives_df['negative_lower'].str.split()
+    negatives_df['match_type'] = negatives_df['match_type'].fillna('BROAD').astype(str).str.strip().str.upper()
+    
+    # Separate negatives by match type for efficient processing
+    exact_negatives = negatives_df[negatives_df['match_type'] == 'EXACT']['negative_lower'].values.tolist()
+    phrase_negatives = negatives_df[negatives_df['match_type'] == 'PHRASE'][['negative_lower', 'negative_keyword']].values.tolist()
+    broad_negatives = negatives_df[negatives_df['match_type'] == 'BROAD'][['negative_words', 'negative_keyword']].values.tolist()
+    
+    # Initialize result columns
+    terms_df['excluded_by_negatives'] = False
+    terms_df['exclusion_reason'] = 'Not matched by any negative'
+    terms_df['matched_negative_keyword'] = ''
+    terms_df['matched_negative_match_type'] = ''
+    
+    # Process EXACT matches
+    if exact_negatives:
+        exact_set = set(exact_negatives)
+        mask = terms_df['search_term_lower'].isin(exact_set)
+        for idx in terms_df[mask].index:
+            search_term = terms_df.at[idx, 'search_term_lower']
+            if search_term in exact_set:
+                terms_df.at[idx, 'excluded_by_negatives'] = True
+                terms_df.at[idx, 'exclusion_reason'] = f"Excluded by EXACT negative: {search_term}"
+                terms_df.at[idx, 'matched_negative_match_type'] = 'EXACT'
+                # Find the original keyword
+                for neg_lower, neg_keyword in phrase_negatives:
+                    if neg_lower == search_term:
+                        terms_df.at[idx, 'matched_negative_keyword'] = neg_keyword
+                        break
+                else:
+                    # Fallback: find in exact_negatives
+                    for neg_row in negatives_df[negatives_df['negative_lower'] == search_term].itertuples():
+                        terms_df.at[idx, 'matched_negative_keyword'] = neg_row.negative_keyword
+                        break
+    
+    # Process PHRASE matches (only check non-excluded)
+    if phrase_negatives:
+        for idx in terms_df[~terms_df['excluded_by_negatives']].index:
+            search_term = terms_df.at[idx, 'search_term_lower']
+            for phrase_lower, phrase_keyword in phrase_negatives:
+                if phrase_lower in search_term:
+                    terms_df.at[idx, 'excluded_by_negatives'] = True
+                    terms_df.at[idx, 'exclusion_reason'] = f"Excluded by PHRASE negative: {phrase_keyword}"
+                    terms_df.at[idx, 'matched_negative_keyword'] = phrase_keyword
+                    terms_df.at[idx, 'matched_negative_match_type'] = 'PHRASE'
+                    break
+    
+    # Process BROAD matches (only check non-excluded)
+    if broad_negatives:
+        for idx in terms_df[~terms_df['excluded_by_negatives']].index:
+            term_words = terms_df.at[idx, 'search_term_words']
+            if not isinstance(term_words, list) or not term_words:
+                continue
+            term_word_set = set(term_words)
+            
+            for broad_words, broad_keyword in broad_negatives:
+                if not isinstance(broad_words, list) or not broad_words:
+                    continue
+                if any(word in term_word_set for word in broad_words):
+                    terms_df.at[idx, 'excluded_by_negatives'] = True
+                    terms_df.at[idx, 'exclusion_reason'] = f"Excluded by BROAD negative: {broad_keyword}"
+                    terms_df.at[idx, 'matched_negative_keyword'] = broad_keyword
+                    terms_df.at[idx, 'matched_negative_match_type'] = 'BROAD'
+                    break
+    
+    # Add timestamp
+    terms_df['checked_at'] = datetime.now().isoformat()
+    
+    # Prepare result DataFrames
+    results_df = terms_df.copy()
+    audit_df = terms_df.copy()
+    
+    # Remove temporary columns
+    cols_to_drop = ['search_term_lower', 'search_term_words']
+    results_df = results_df.drop(columns=cols_to_drop, errors='ignore')
+    audit_df = audit_df.drop(columns=cols_to_drop, errors='ignore')
     
     # Separate excluded and included terms
     excluded_count = results_df['excluded_by_negatives'].sum()
@@ -357,28 +367,91 @@ def filter_search_terms(terms_df, negatives_df):
     return results_df, audit_df
 
 def main():
-    parser = argparse.ArgumentParser(description='Filter search terms using negative keywords')
+    parser = argparse.ArgumentParser(description='Elite Google Ads Filter - ROI Optimization Engine')
     parser.add_argument('--terms', required=True, help='Search terms file (CSV, Excel, or PDF)')
     parser.add_argument('--negatives', required=True, help='Negative keywords file (CSV, Excel, or PDF)')
     parser.add_argument('--output', required=True, help='Output CSV file for review')
     parser.add_argument('--audit-output', help='Output CSV file for audit trail')
     parser.add_argument('--analyze-output', help='Output CSV file for analysis')
     parser.add_argument('--editor-export', help='Export format for Google Ads Editor')
+    parser.add_argument('--analytics-output', help='Output JSON file for analytics dashboard')
+    parser.add_argument('--suggestions-output', help='Output CSV file for auto-generated negative suggestions')
     
     args = parser.parse_args()
     
     try:
         # Load data
+        # Validate input file paths and sizes
+        MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB
+        
+        for filepath in [args.terms, args.negatives]:
+            if not os.path.exists(filepath):
+                raise FileNotFoundError(f"File not found: {filepath}")
+            file_size = os.path.getsize(filepath)
+            if file_size > MAX_FILE_SIZE:
+                raise ValueError(f"File too large ({file_size} bytes > {MAX_FILE_SIZE}): {filepath}")
+            if file_size == 0:
+                raise ValueError(f"File is empty: {filepath}")
+        
         print(f"Loading search terms from: {args.terms}")
         terms_df = load_search_terms(args.terms)
         
         print(f"Loading negatives from: {args.negatives}")
         negatives_df = load_negatives(args.negatives)
         
+        # Validate loaded data
+        if terms_df.empty:
+            raise ValueError("Search terms file is empty after loading")
+        if negatives_df.empty:
+            raise ValueError("Negatives file is empty after loading")
+        
         print(f"Loaded {len(terms_df)} search terms and {len(negatives_df)} negatives.")
         
         # Filter terms
         results_df, audit_df = filter_search_terms(terms_df, negatives_df)
+        
+        # ELITE: Generate analytics and insights
+        print("Analyzing performance metrics...")
+        try:
+            from analytics import PerformanceAnalytics
+            analytics = PerformanceAnalytics(terms_df, negatives_df, results_df)
+            exec_summary = analytics.get_executive_summary()
+        except Exception as e:
+            print(f"Warning: Analytics engine error: {e}")
+            exec_summary = {
+                'metrics': {'cost_waste_prevented': 0, 'cost_reduction_percentage': 0, 'quality_score': 0, 'action_score': 0},
+                'total_terms_analyzed': len(results_df),
+                'terms_excluded': int(results_df['excluded_by_negatives'].sum()),
+                'terms_remaining': int((~results_df['excluded_by_negatives']).sum()),
+                'recommendation': []
+            }
+        
+        # ELITE: Auto-generate negative suggestions
+        print("Generating AI negative keyword suggestions...")
+        try:
+            from auto_negative import AutoNegativeEngine
+            auto_neg = AutoNegativeEngine(terms_df)
+            auto_suggestions = auto_neg.generate_suggestions(threshold=65)
+            impact = auto_neg.get_impact_summary()
+        except Exception as e:
+            print(f"Warning: Auto-negative engine error: {e}")
+            auto_suggestions = []
+            impact = {'total_suggested': 0, 'potential_cost_savings': 0, 'potential_impression_reduction': 0, 'top_priority': None}
+        
+        # Print elite metrics to console
+        print("\n" + "="*60)
+        print("ELITE PERFORMANCE METRICS")
+        print("="*60)
+        print(f"Cost Waste Prevented: ${exec_summary['metrics'].get('cost_waste_prevented', 0):,.2f}")
+        print(f"Cost Reduction: {exec_summary['metrics'].get('cost_reduction_percentage', 0):.1f}%")
+        print(f"Terms Excluded: {exec_summary['terms_excluded']} / {exec_summary['total_terms_analyzed']}")
+        print(f"Quality Score: {exec_summary['metrics'].get('quality_score', 0):.1f}%")
+        print(f"Action Score: {exec_summary['metrics'].get('action_score', 0)}/100")
+        print(f"\nAI Suggestions: {impact.get('total_suggested', 0)} new negatives identified")
+        print(f"Potential Additional Savings: ${impact.get('potential_cost_savings', 0):,.2f}")
+        top_priority = impact.get('top_priority', 'None identified')
+        print(f"Priority Action: {top_priority}")
+        print("="*60 + "\n")
         
         # Save outputs
         print(f"Saving review output to: {args.output}")
@@ -388,12 +461,31 @@ def main():
             print(f"Saving audit output to: {args.audit_output}")
             audit_df.to_csv(args.audit_output, index=False)
         
+        # ELITE: Save analytics
+        if args.analytics_output:
+            print(f"Saving analytics to: {args.analytics_output}")
+            import json
+            with open(args.analytics_output, 'w') as f:
+                json.dump(exec_summary, f, indent=2, default=str)
+        
+        # ELITE: Save auto-generated suggestions
+        if args.suggestions_output:
+            print(f"Saving AI suggestions to: {args.suggestions_output}")
+            suggestions_df = pd.DataFrame(auto_suggestions)
+            suggestions_df.to_csv(args.suggestions_output, index=False)
+            
+            # Also save Google Ads import format
+            ads_format = auto_neg.export_to_ads_format()
+            ads_file = args.suggestions_output.replace('.csv', '_ads_import.csv')
+            with open(ads_file, 'w') as f:
+                f.write(ads_format)
+            print(f"Saved Google Ads import format to: {ads_file}")
+        
         if args.analyze_output:
             print(f"Saving analysis output to: {args.analyze_output}")
-            # Add analysis logic here if needed
             results_df.to_csv(args.analyze_output, index=False)
         
-        print("Done.")
+        print("Done. Elite processing complete.")
         
     except Exception as e:
         print(f"Error: {e}")
