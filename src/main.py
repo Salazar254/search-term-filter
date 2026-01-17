@@ -6,6 +6,7 @@ from datetime import datetime
 import warnings
 import csv
 import chardet  # For detecting file encoding
+import re
 warnings.filterwarnings('ignore')
 
 # Try to import PDF libraries (optional)
@@ -267,27 +268,93 @@ def load_negatives(filepath):
     
     return df
 
+def normalize_text(text: str) -> str:
+    """
+    Normalizes a search term or negative keyword according to spec:
+    1. Lowercase
+    2. Trim whitespace
+    3. Collapse multiple spaces
+    4. Remove surrounding quotes/brackets
+    """
+    if not isinstance(text, str):
+        return ""
+    
+    text = text.lower().strip()
+    
+    # Remove surrounding quotes (single or double) on the whole string
+    if text.startswith('"') and text.endswith('"') and len(text) > 1:
+        text = text[1:-1]
+    elif text.startswith("'") and text.endswith("'") and len(text) > 1:
+        text = text[1:-1]
+    elif text.startswith("[") and text.endswith("]") and len(text) > 1:
+        text = text[1:-1]
+    
+    # Collapse multiple spaces
+    text = re.sub(r'\s+', ' ', text)
+    
+    return text.strip()
+
+def tokenize_text(text: str) -> list:
+    """Splits text by space into tokens."""
+    return text.split()
+
+def is_phrase_match_token_aware(search_tokens: list, phrase_tokens: list) -> bool:
+    """
+    Checks for phrase match: phrase_tokens must appear as a contiguous sub-sequence
+    in search_tokens. Token-aware to avoid false positives.
+    """
+    n_len = len(phrase_tokens)
+    s_len = len(search_tokens)
+    
+    if n_len > s_len:
+        return False
+    
+    for i in range(s_len - n_len + 1):
+        if search_tokens[i : i + n_len] == phrase_tokens:
+            return True
+    
+    return False
+
 def filter_search_terms(terms_df, negatives_df):
-    """Filter search terms based on negative keywords using optimized vectorized operations"""
+    """Filter search terms based on negative keywords using optimized operations"""
     print("Filtering terms...")
     
     # Normalize and prepare data
     terms_df = terms_df.copy()
     negatives_df = negatives_df.copy()
     
-    # Normalize search terms
-    terms_df['search_term_lower'] = terms_df['Search term'].fillna('').astype(str).str.strip().str.lower()
-    terms_df['search_term_words'] = terms_df['search_term_lower'].str.split()
+    # Normalize search terms using proper normalization function
+    terms_df['search_term_normalized'] = terms_df['Search term'].fillna('').astype(str).apply(normalize_text)
+    terms_df['search_term_tokens'] = terms_df['search_term_normalized'].apply(tokenize_text)
     
     # Normalize negatives
-    negatives_df['negative_lower'] = negatives_df['negative_keyword'].fillna('').astype(str).str.strip().str.lower()
-    negatives_df['negative_words'] = negatives_df['negative_lower'].str.split()
+    negatives_df['negative_normalized'] = negatives_df['negative_keyword'].fillna('').astype(str).apply(normalize_text)
+    negatives_df['negative_tokens'] = negatives_df['negative_normalized'].apply(tokenize_text)
     negatives_df['match_type'] = negatives_df['match_type'].fillna('BROAD').astype(str).str.strip().str.upper()
     
     # Separate negatives by match type for efficient processing
-    exact_negatives = negatives_df[negatives_df['match_type'] == 'EXACT']['negative_lower'].values.tolist()
-    phrase_negatives = negatives_df[negatives_df['match_type'] == 'PHRASE'][['negative_lower', 'negative_keyword']].values.tolist()
-    broad_negatives = negatives_df[negatives_df['match_type'] == 'BROAD'][['negative_words', 'negative_keyword']].values.tolist()
+    exact_negatives = []
+    phrase_negatives = []
+    broad_negatives = []
+    
+    for _, row in negatives_df.iterrows():
+        neg_normalized = row['negative_normalized']
+        neg_tokens = row['negative_tokens']
+        neg_keyword = row['negative_keyword']
+        match_type = row['match_type']
+        
+        if not neg_tokens:  # Skip empty
+            continue
+        
+        if match_type == 'EXACT':
+            exact_negatives.append((neg_normalized, neg_keyword))
+        elif match_type == 'PHRASE':
+            phrase_negatives.append((neg_tokens, neg_keyword))
+        elif match_type == 'BROAD':
+            broad_negatives.append((set(neg_tokens), neg_keyword))
+    
+    # Convert exact to set for O(1) lookup
+    exact_set = {norm: orig for norm, orig in exact_negatives}
     
     # Initialize result columns
     terms_df['excluded_by_negatives'] = False
@@ -295,74 +362,70 @@ def filter_search_terms(terms_df, negatives_df):
     terms_df['matched_negative_keyword'] = ''
     terms_df['matched_negative_match_type'] = ''
     
-    # Process EXACT matches
-    if exact_negatives:
-        exact_set = set(exact_negatives)
-        mask = terms_df['search_term_lower'].isin(exact_set)
-        for idx in terms_df[mask].index:
-            search_term = terms_df.at[idx, 'search_term_lower']
-            if search_term in exact_set:
+    # Process each search term
+    for idx in terms_df.index:
+        if terms_df.at[idx, 'excluded_by_negatives']:
+            continue  # Already excluded
+        
+        search_normalized = terms_df.at[idx, 'search_term_normalized']
+        search_tokens = terms_df.at[idx, 'search_term_tokens']
+        
+        if not search_tokens:
+            continue
+        
+        # 1. Check EXACT matches (fastest - O(1) lookup)
+        if search_normalized in exact_set:
+            terms_df.at[idx, 'excluded_by_negatives'] = True
+            terms_df.at[idx, 'exclusion_reason'] = f"Excluded by EXACT negative: {exact_set[search_normalized]}"
+            terms_df.at[idx, 'matched_negative_keyword'] = exact_set[search_normalized]
+            terms_df.at[idx, 'matched_negative_match_type'] = 'EXACT'
+            continue
+        
+        # 2. Check PHRASE matches (token-aware to avoid false positives)
+        for phrase_tokens, phrase_keyword in phrase_negatives:
+            if is_phrase_match_token_aware(search_tokens, phrase_tokens):
                 terms_df.at[idx, 'excluded_by_negatives'] = True
-                terms_df.at[idx, 'exclusion_reason'] = f"Excluded by EXACT negative: {search_term}"
-                terms_df.at[idx, 'matched_negative_match_type'] = 'EXACT'
-                # Find the original keyword
-                for neg_lower, neg_keyword in phrase_negatives:
-                    if neg_lower == search_term:
-                        terms_df.at[idx, 'matched_negative_keyword'] = neg_keyword
-                        break
-                else:
-                    # Fallback: find in exact_negatives
-                    for neg_row in negatives_df[negatives_df['negative_lower'] == search_term].itertuples():
-                        terms_df.at[idx, 'matched_negative_keyword'] = neg_row.negative_keyword
-                        break
-    
-    # Process PHRASE matches (only check non-excluded)
-    if phrase_negatives:
-        for idx in terms_df[~terms_df['excluded_by_negatives']].index:
-            search_term = terms_df.at[idx, 'search_term_lower']
-            for phrase_lower, phrase_keyword in phrase_negatives:
-                if phrase_lower in search_term:
-                    terms_df.at[idx, 'excluded_by_negatives'] = True
-                    terms_df.at[idx, 'exclusion_reason'] = f"Excluded by PHRASE negative: {phrase_keyword}"
-                    terms_df.at[idx, 'matched_negative_keyword'] = phrase_keyword
-                    terms_df.at[idx, 'matched_negative_match_type'] = 'PHRASE'
-                    break
-    
-    # Process BROAD matches (only check non-excluded)
-    if broad_negatives:
-        for idx in terms_df[~terms_df['excluded_by_negatives']].index:
-            term_words = terms_df.at[idx, 'search_term_words']
-            if not isinstance(term_words, list) or not term_words:
-                continue
-            term_word_set = set(term_words)
-            
-            for broad_words, broad_keyword in broad_negatives:
-                if not isinstance(broad_words, list) or not broad_words:
-                    continue
-                if any(word in term_word_set for word in broad_words):
-                    terms_df.at[idx, 'excluded_by_negatives'] = True
-                    terms_df.at[idx, 'exclusion_reason'] = f"Excluded by BROAD negative: {broad_keyword}"
-                    terms_df.at[idx, 'matched_negative_keyword'] = broad_keyword
-                    terms_df.at[idx, 'matched_negative_match_type'] = 'BROAD'
-                    break
+                terms_df.at[idx, 'exclusion_reason'] = f"Excluded by PHRASE negative: {phrase_keyword}"
+                terms_df.at[idx, 'matched_negative_keyword'] = phrase_keyword
+                terms_df.at[idx, 'matched_negative_match_type'] = 'PHRASE'
+                break
+        
+        if terms_df.at[idx, 'excluded_by_negatives']:
+            continue  # Already excluded by phrase
+        
+        # 3. Check BROAD matches (all words must be present)
+        search_token_set = set(search_tokens)
+        for broad_token_set, broad_keyword in broad_negatives:
+            if broad_token_set.issubset(search_token_set):
+                terms_df.at[idx, 'excluded_by_negatives'] = True
+                terms_df.at[idx, 'exclusion_reason'] = f"Excluded by BROAD negative: {broad_keyword}"
+                terms_df.at[idx, 'matched_negative_keyword'] = broad_keyword
+                terms_df.at[idx, 'matched_negative_match_type'] = 'BROAD'
+                break
     
     # Add timestamp
     terms_df['checked_at'] = datetime.now().isoformat()
     
     # Prepare result DataFrames
-    results_df = terms_df.copy()
+    # Primary output: only non-excluded terms (for manual review)
+    results_df = terms_df[~terms_df['excluded_by_negatives']].copy()
+    # Audit output: all terms with exclusion info
     audit_df = terms_df.copy()
     
     # Remove temporary columns
-    cols_to_drop = ['search_term_lower', 'search_term_words']
+    cols_to_drop = ['search_term_normalized', 'search_term_tokens']
     results_df = results_df.drop(columns=cols_to_drop, errors='ignore')
     audit_df = audit_df.drop(columns=cols_to_drop, errors='ignore')
     
-    # Separate excluded and included terms
-    excluded_count = results_df['excluded_by_negatives'].sum()
-    remaining_count = len(results_df) - excluded_count
+    # Ensure excluded_by_negatives is boolean
+    results_df['excluded_by_negatives'] = results_df['excluded_by_negatives'].astype(bool)
+    audit_df['excluded_by_negatives'] = audit_df['excluded_by_negatives'].astype(bool)
     
-    print(f"Filtering complete. Excluded {excluded_count} terms. Remaining {remaining_count} terms.")
+    # Separate excluded and included terms
+    excluded_count = audit_df['excluded_by_negatives'].sum()
+    remaining_count = len(results_df)
+    
+    print(f"Filtering complete. Excluded {excluded_count} terms. Remaining {remaining_count} terms for review.")
     
     return results_df, audit_df
 
@@ -413,22 +476,30 @@ def main():
         # ELITE: Generate analytics and insights
         print("Analyzing performance metrics...")
         try:
+            # Import from same package (ensure src directory is in path)
+            src_dir = os.path.dirname(os.path.abspath(__file__))
+            if src_dir not in sys.path:
+                sys.path.insert(0, src_dir)
             from analytics import PerformanceAnalytics
             analytics = PerformanceAnalytics(terms_df, negatives_df, results_df)
             exec_summary = analytics.get_executive_summary()
         except Exception as e:
             print(f"Warning: Analytics engine error: {e}")
+            # Calculate from audit_df which has all terms
+            excluded_count = int(audit_df['excluded_by_negatives'].sum())
+            total_count = len(audit_df)
             exec_summary = {
                 'metrics': {'cost_waste_prevented': 0, 'cost_reduction_percentage': 0, 'quality_score': 0, 'action_score': 0},
-                'total_terms_analyzed': len(results_df),
-                'terms_excluded': int(results_df['excluded_by_negatives'].sum()),
-                'terms_remaining': int((~results_df['excluded_by_negatives']).sum()),
+                'total_terms_analyzed': total_count,
+                'terms_excluded': excluded_count,
+                'terms_remaining': total_count - excluded_count,
                 'recommendation': []
             }
         
         # ELITE: Auto-generate negative suggestions
         print("Generating AI negative keyword suggestions...")
         try:
+            # Import from same package
             from auto_negative import AutoNegativeEngine
             auto_neg = AutoNegativeEngine(terms_df)
             auto_suggestions = auto_neg.generate_suggestions(threshold=65)

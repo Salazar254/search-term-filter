@@ -1,5 +1,0 @@
-Search term,Clicks,Impressions,excluded_by_negatives,exclusion_reason,checked_at,matched_negative_keyword,matched_negative_match_type
-buy running shoes online,50,1000,True,Excluded by PHRASE negative: running shoes,2026-01-08T22:40:00.164150,running shoes,PHRASE
-shoes for running,30,800,True,Excluded by BROAD negative: shoes running,2026-01-08T22:40:00.164179,shoes running,BROAD
-running sandals,10,200,False,Not matched by any negative,2026-01-08T22:40:00.164195,,
-running shoes,100,5000,True,Excluded by EXACT negative: running shoes,2026-01-08T22:40:00.164202,running shoes,EXACT

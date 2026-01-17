@@ -15,3 +15,7 @@ data/output_*.csv
 data/editor_*.csv
 web/server/uploads/
 web/server/outputs/
+web/data/audit.csv
+web/data/review.csv
+*.csv.bak
+test_*.csv
