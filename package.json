@@ -1,0 +1,32 @@
+{
+  "name": "search-term-filter-desktop",
+  "version": "1.0.0",
+  "description": "Search Term Filter Desktop Application",
+  "main": "web/main.js",
+  "homepage": "./",
+  "scripts": {
+    "dev": "concurrently \"npm run dev:client\" \"npm run dev:server\"",
+    "dev:client": "cd web/client && npm run dev",
+    "dev:server": "cd web/server && npm run dev",
+    "dev:electron": "concurrently \"npm run dev:client\" \"npm run dev:server\" \"wait-on http://localhost:5173 http://localhost:3000 && electron .\"",
+    "build": "npm run build:client && npm run build:server",
+    "build:client": "cd web/client && npm run build",
+    "build:server": "echo 'Server is already built'",
+    "package": "npm run build && electron-builder --win --publish never",
+    "package:portable": "npm run build && electron-builder --win --portable --publish never",
+    "package:installer": "npm run build && electron-builder --win --nsis --publish never"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "express-rate-limit": "^7.1.5",
+    "multer": "^2.0.2"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.0",
+    "electron": "^27.0.0",
+    "electron-builder": "^24.6.4",
+    "electron-is-dev": "^2.0.0",
+    "wait-on": "^7.0.1"
+  }
+}
