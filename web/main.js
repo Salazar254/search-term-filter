@@ -26,18 +26,30 @@ function getPythonPath() {
 // Start Node.js backend server
 function startBackendServer() {
   return new Promise((resolve, reject) => {
+    // Get backend path - in production it's bundled with the app
     const backendPath = isDev 
       ? path.join(__dirname, '../server')
       : path.join(process.resourcesPath, 'server');
 
-    backendProcess = spawn('node', [path.join(backendPath, 'index.js')], {
-      stdio: 'pipe',
-      detached: false
+    const indexPath = path.join(backendPath, 'index.js');
+    
+    console.log('Starting backend server from:', indexPath);
+    console.log('Backend path exists:', fs.existsSync(indexPath));
+
+    backendProcess = spawn('node', [indexPath], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      detached: false,
+      cwd: backendPath,
+      env: { ...process.env, NODE_ENV: isDev ? 'development' : 'production' }
     });
 
+    let serverStarted = false;
+
     backendProcess.stdout.on('data', (data) => {
-      console.log(`[Backend] ${data}`);
-      if (data.toString().includes('listening')) {
+      const message = data.toString();
+      console.log(`[Backend] ${message}`);
+      if (!serverStarted && (message.includes('listening') || message.includes('3000'))) {
+        serverStarted = true;
         resolve();
       }
     });
@@ -46,10 +58,18 @@ function startBackendServer() {
       console.error(`[Backend Error] ${data}`);
     });
 
-    backendProcess.on('error', reject);
+    backendProcess.on('error', (error) => {
+      console.error('Failed to start backend server:', error);
+      reject(error);
+    });
     
-    // Timeout after 10 seconds
-    setTimeout(resolve, 10000);
+    // Timeout after 15 seconds
+    setTimeout(() => {
+      if (!serverStarted) {
+        console.log('Backend startup timeout - assuming server started');
+        resolve();
+      }
+    }, 15000);
   });
 }
 

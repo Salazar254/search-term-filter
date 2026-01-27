@@ -1,5 +1,22 @@
 import { useState } from 'react';
 
+// Get API endpoint - works in both dev and production
+const API_ENDPOINT = (() => {
+  if (typeof window !== 'undefined' && window.location.hostname === 'localhost') {
+    // Development mode - using dev server
+    return 'http://localhost:3001/api';
+  }
+  // Production mode (Electron app) - backend runs on localhost:3001
+  return 'http://localhost:3001/api';
+})();
+
+const FILE_ENDPOINT = (() => {
+  if (typeof window !== 'undefined' && window.location.hostname === 'localhost') {
+    return 'http://localhost:3001';
+  }
+  return 'http://localhost:3001';
+})();
+
 function App() {
     const [termsFile, setTermsFile] = useState<File | null>(null);
     const [negativesFile, setNegativesFile] = useState<File | null>(null);
@@ -22,7 +39,7 @@ function App() {
         formData.append('negatives', negativesFile);
 
         try {
-            const response = await fetch('http://localhost:3001/api/upload-and-process', {
+            const response = await fetch(`${API_ENDPOINT}/upload-and-process`, {
                 method: 'POST',
                 body: formData,
                 headers: {
@@ -344,19 +361,19 @@ function App() {
                                 <div className="bg-white border border-gray-200 rounded-lg p-6">
                                     <h3 className="text-lg font-semibold text-gray-900 mb-4">Export Data</h3>
                                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
-                                        <a href={`http://localhost:3001${results.results.review}`} download className="p-4 border border-gray-300 rounded-lg hover:bg-gray-50 transition">
+                                        <a href={`${FILE_ENDPOINT}${results.results.review}`} download className="p-4 border border-gray-300 rounded-lg hover:bg-gray-50 transition">
                                             <p className="font-medium text-gray-900 text-sm">Review File</p>
                                             <p className="text-gray-600 text-xs mt-1">CSV • Filtered terms</p>
                                         </a>
-                                        <a href={`http://localhost:3001${results.results.audit}`} download className="p-4 border border-gray-300 rounded-lg hover:bg-gray-50 transition">
+                                        <a href={`${FILE_ENDPOINT}${results.results.audit}`} download className="p-4 border border-gray-300 rounded-lg hover:bg-gray-50 transition">
                                             <p className="font-medium text-gray-900 text-sm">Audit Trail</p>
                                             <p className="text-gray-600 text-xs mt-1">CSV • Complete data</p>
                                         </a>
-                                        <a href={`http://localhost:3001${results.results.suggestions || results.results.analysis}`} download className="p-4 border border-gray-300 rounded-lg hover:bg-gray-50 transition">
+                                        <a href={`${FILE_ENDPOINT}${results.results.suggestions || results.results.analysis}`} download className="p-4 border border-gray-300 rounded-lg hover:bg-gray-50 transition">
                                             <p className="font-medium text-gray-900 text-sm">AI Suggestions</p>
                                             <p className="text-gray-600 text-xs mt-1">CSV • Negatives</p>
                                         </a>
-                                        <a href={`http://localhost:3001${results.results.analytics || results.results.editor}`} download className="p-4 border border-gray-300 rounded-lg hover:bg-gray-50 transition">
+                                        <a href={`${FILE_ENDPOINT}${results.results.analytics || results.results.editor}`} download className="p-4 border border-gray-300 rounded-lg hover:bg-gray-50 transition">
                                             <p className="font-medium text-gray-900 text-sm">Analytics</p>
                                             <p className="text-gray-600 text-xs mt-1">JSON • Full metrics</p>
                                         </a>
