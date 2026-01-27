@@ -1,0 +1,4 @@
+﻿negative_keyword,match_type
+running shoes,PHRASE
+running shoes,EXACT
+shoes running,BROAD
